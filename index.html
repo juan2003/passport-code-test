@@ -15,6 +15,7 @@
 		border-left: 2pt solid black;
 		position: relative;
 		margin: 1em;
+		padding-bottom: 1px;
 	}
 	#root .create-new {
 		position: absolute;
@@ -28,7 +29,7 @@
 		left: -1em;
 		right: -1em;
 		height: 1.5em;
-		background-color: #0bd;
+		background-color: rgb(86, 250, 192);
 		color: white;
 		padding: 0.25em 0.6em;
 	}
@@ -84,8 +85,29 @@
 	}
 	nav.context-menu {
 		position: absolute;
-		border: 1px solid red;
 		display: none;
+		background-color: #ccc;
+	}
+	nav ul {
+		padding: 0;
+		margin: 0;
+	}
+	nav ul li {
+		list-style: none;
+		padding: 0;
+		margin: 0;
+	}
+	nav ul li a {
+		display: block;
+		padding: 0.1em;
+		margin: 0;
+		text-decoration: none;
+		color: black;
+		width: 10em;
+	}
+	nav ul li a:hover{
+		background-color: navy;
+		color: white;
 	}
 </style>
 </head>
@@ -96,16 +118,14 @@
 <script>
 "use strict";
 (function(doc){
-	//V1 is front-end only
+	//V2 uses websockets for a single connection
 	var cssIdPrefix = "factory-";
-	var fakelist = [
-		{name: "Jeremy", id:1, low: 70, high: 420, members: [286, 154]},
-		{name:"djw", id:2, low:42, high: 256, members: [86,250,192]}
-	];
+	var branchSelector = ".branch";
 	var eventHandlers = {};
 	var root = doc.getElementById("root");
 	var contextMenu = buildContextMenu();
 	var ctxActive = false;
+	var connection = initWebsocket();
 	function init() {
 		registerHandler("click", ".create-new", addNewFactory);
 		registerHandler("click", ".name", renameFactory);
@@ -113,21 +133,65 @@
 		registerHandler("click", ".range", updateRange);
 		registerHandler("click", ".branch .go", generateMembers);
 		registerHandler("click", ".branch .cancel", revertChanges);
-		registerHandler("click", "nav.context-menu a.delete", deleteFactory);
+		registerHandler("click", "nav.context-menu a.delete", deleteContext);
+		registerHandler("click", "nav.context-menu a.rename", renameContext);
+		registerHandler("click", "nav.context-menu a.generate", generateContext);
+		registerHandler("click", "nav.context-menu a.change", rangeContext);
 		registerHandler("click", "*", hideContextMenu);
 		root.appendChild( newNode("button", {"class": "create-new"}, "Create New"));
-		fakelist.forEach(loadFactory);
 	}
-	function getId (node) {
+	function initWebsocket() {
+		var connection = new WebSocket("ws://"+location.host+"/ws");
+		connection.onmessage = function(evt) {
+			var data = JSON.parse(evt.data);
+			data.forEach(loadFactory);
+		};
+		connection.onopen = function() {
+			wsList();
+			setInterval(wsPing, 11000);
+		};
+		connection.onclose = function() {
+			console.log("The store is closed");
+		}
+		return connection; 
+	}
+	function wsPing() {
+		connection.send("echo []");
+	}
+	function wsDelete(id) {
+		connection.send("dele "+id);
+	}
+	function wsRetrieve(id) {
+		connection.send("retr "+id)
+	}
+	function wsList() {
+		connection.send("list");		
+	}
+	var numericProps = ["Id","Count","Low","High"];
+	function wsUpsert(obj) {
+		var item = obj;
+		//Make sure numbers are not passed as strings
+		numericProps.forEach(function(prop){
+			if ( item.hasOwnProperty(prop) && typeof item[prop != "number"] ){
+				item[prop] = parseInt(item[prop])
+			}
+		});
+		item.Id = parseInt(item.Id);
+		connection.send("post "+JSON.stringify(item));
+	}
+	function getBranch (node) {
 		var el = node;
-		while ( !el.dataset.id ){
+		while ( !el.matches(branchSelector) ){
 			el = el.parentElement;
 		}
-		return el.dataset.id;
+		return el;
 	}
 	function buildContextMenu () {
 		var ul = newNode("ul");
 		var nav = newNode("nav", {"class":"context-menu"}, ul);
+		ul.appendChild( newNode("li", {}, newNode("a", {href:"#", "class": "generate"}, "Generate")) );
+		ul.appendChild( newNode("li", {}, newNode("a", {href:"#", "class": "change"}, "Range & Count")) );
+		ul.appendChild( newNode("li", {}, newNode("a", {href:"#", "class": "rename"}, "Rename")) );
 		ul.appendChild( newNode("li", {}, newNode("a", {href:"#", "class": "delete"}, "Delete")) );
 		root.parentElement.appendChild(nav);
 		return nav;
@@ -139,32 +203,69 @@
 		}
 	}
 	function showContextMenu (evt) {
+		var id = getBranch(evt.target).dataset.id;
+		var obj = JSON.parse(getBranch(evt.target).dataset.initial);
+		if ( !id ) {
+			return;
+		}
 		evt.preventDefault();
-		contextMenu.dataset.id = getId(evt.target);
-		contextMenu.style.top = evt.clientY+"px";
-		contextMenu.style.left = evt.clientX+"px";
+		contextMenu.dataset.id = id
+		contextMenu.style.top = evt.pageY+"px";
+		contextMenu.style.left = evt.pageX+"px";
 		contextMenu.style.display = "block";
+		contextMenu.dataset.count = obj.Members.length;
+		contextMenu.querySelector(".generate").textContent = "Generate "+obj.Members.length+" items";
 		ctxActive = true;
 	}
-	function deleteFactory (evt) {
+	function deleteContext (evt) {
 		evt.preventDefault();
-		var id = getId(this);
-		var idx = fakelist.findIndex(getById(id));
-		fakelist.splice(idx);
-		root.removeChild(root.querySelector("#"+cssIdPrefix+id) );
+		var el = this;
+		while ( !el.dataset.id ){
+			el = el.parentElement;
+		}
+		//Issue the delete command
+		wsDelete(el.dataset.id);
 	}
+	function renameContext (evt) {
+		evt.preventDefault();
+		var el = this;
+		while ( !el.dataset.id ){
+			el = el.parentElement;
+		}
+		//Trigger the click event on the name
+		doc.querySelector("#"+cssIdPrefix+el.dataset.id+" .name").click();
+	}
+	function generateContext (evt) {
+		evt.preventDefault();
+		var el = this;
+		while ( !el.dataset.id ){
+			el = el.parentElement;
+		}
+		//Generate new items
+		wsUpsert({Id: el.dataset.id, Count: el.dataset.count})
+	}
+	function rangeContext (evt) {
+		evt.preventDefault();
+		var el = this;
+		while ( !el.dataset.id ){
+			el = el.parentElement;
+		}
+		//Trigger the click event on the name
+		doc.querySelector("#"+cssIdPrefix+el.dataset.id+" .range").click();
+	}
+	//Shows the new factory form
 	function addNewFactory (evt) {
 		evt.preventDefault();
 		var form = newNode("form", {"class":"branch"});
 		var name = newNode("label", {"class":"name"}, "Name");
-		name.appendChild(newNode("input", {name:"name", type:"text"}));
+		name.appendChild(newNode("input", {name:"Name", type:"text"}));
 
 		var low = newNode("label", {"class":"member"}, "Low");
-		low.appendChild(newNode("input", {name:"low", type: "number"}));
+		low.appendChild(newNode("input", {name:"Low", type: "number"}));
 		var high = newNode("label", {"class":"member"}, "High");
-		high.appendChild(newNode("input", {name:"high", type: "number"}));
+		high.appendChild(newNode("input", {name:"High", type: "number"}));
 		var count = newNode("label", {"class":"member"}, "Count");
-		count.appendChild(newNode("input", {name:"count", type: "number", min: 1, max: 15}));
+		count.appendChild(newNode("input", {name:"Count", type: "number", min: 1, max: 15}));
 		var actions = newNode("div", {"class":"member"});
 		actions.appendChild(newNode("button", {"class":"go"}, "Create"));
 		actions.appendChild(newNode("button", {"class":"cancel"}, "Cancel"));
@@ -177,20 +278,22 @@
 
 		root.appendChild(form);
 		form[0].select();
+		setMargin();
 	}
+	//Shows the update range form
 	function updateRange (evt) {
 		evt.preventDefault();
 		if (this.children.length > 0){
 			return;
 		}
 		//Create the update range UI
-		var branch = this.parentElement;
+		var id = getBranch(this).dataset.id;
 		var rangeNode = newNode("form");
-		var low = newNode("input", {name:"low",type:"number", value:this.dataset.low, "data-oldvalue": this.dataset.low});
-		var high = newNode("input", {name:"high",type:"number", value:this.dataset.high, "data-oldvalue": this.dataset.high});
-		var count = newNode("input", {name:"count",type:"number", value:this.dataset.count, "data-oldvalue": this.dataset.count, min: 1, max: 15});
-		var button = newNode("button", {"class":"go","data-id": branch.dataset.id}, "Go");
-		var cancel = newNode("a", {href:"#","class":"cancel","data-id": branch.dataset.id}, "Cancel");
+		var low = newNode("input", {name:"Low",type:"number", value:this.dataset.low, "data-oldvalue": this.dataset.low});
+		var high = newNode("input", {name:"High",type:"number", value:this.dataset.high, "data-oldvalue": this.dataset.high});
+		var count = newNode("input", {name:"Count",type:"number", value:this.dataset.count, "data-oldvalue": this.dataset.count, min: 1, max: 15});
+		var button = newNode("button", {"class":"go","data-id": id}, "Go");
+		var cancel = newNode("a", {href:"#","class":"cancel","data-id": id}, "Cancel");
 		this.textContent = "";
 
 		rangeNode.appendChild( low );
@@ -200,42 +303,43 @@
 		rangeNode.appendChild( cancel );
 		this.appendChild(rangeNode);
 	}
+	//Reverts to default display
 	function revertChanges (evt) {
 		evt.preventDefault();
-		var id = getId(this);
-		if (id ){
-			updateFactory(id);
+		var el = getBranch(this);
+		if (el.dataset.initial) {
+			loadFactory(JSON.parse(el.dataset.initial));
 		} else {
 			root.removeChild(el);
+			setMargin();
 		}
 	}
 	function newFactory () {
-		var id = fakelist.length
-		fakelist.push( {
-			id: id+1,
-			name: "New Factory",
-			low: 0,
-			high: 100,
-			count: 5,
-			members: []
-		});
-		return fakelist[id];
+		return {
+			Id: 0,
+			Name: "New Factory",
+			Low: 0,
+			High: 100,
+			Count: 5,
+			Members: []
+		};
 	}
 	function generateMembers (evt) {
 		evt.preventDefault();
-		var factory= fakelist.find(getById(this.dataset.id)) || newFactory();
+		var branch = getBranch(this);
+		var factory = branch && branch.dataset.initial ? JSON.parse(branch.dataset.initial) : newFactory();
 		var i, prop;
 		//Copy form values onto factory object
 		var form = this.form;
 		for(i=0; i< form.length; i++){
 			prop = form[i].name;
 			switch (prop) {
-			case "low":
-			case "high":
-			case "count":
+			case "Low":
+			case "High":
+			case "Count":
 				factory[prop] = parseInt(form[i].value);
 				break;
-			case "name":
+			case "Name":
 				factory[prop] = form[i].value;
 				break;
 			default:
@@ -243,20 +347,11 @@
 			}
 		}
 		//Create members
-		factory.members.splice(0);
-		var range = factory.high - factory.low;
-		for(i=0; i<factory.count; i++){
-			factory.members.push( factory.low + Math.floor(Math.random() * range) );
+		wsUpsert(factory);
+		//Remove form if no id
+		if( !branch.id ){
+			root.removeChild(branch);
 		}
-		//Add the id to the form
-		var el = this;
-		while( !el.matches(".branch") ){
-			el=el.parentElement;
-		}
-		if ( !el.id ){
-			el.id = cssIdPrefix+factory.id;
-		}
-		updateFactory(factory.id);
 	}
 	function renameFactory(evt) {
 		evt.preventDefault();
@@ -273,11 +368,13 @@
 		newTextInput.select();
 	}
 	function setNewName(evt) {
-		var data = {};
+		var data = {Id: this.dataset.id};
 		if ( this.value != this.dataset.oldvalue) {
-			data.name = this.value;
+			data.Name = this.value;
+			wsUpsert(data);
+		} else {
+			revertChanges.call(this, evt);
 		}
-		updateFactory(this.dataset.id, data);	
 	}
 	function enterBlur (evt) {
 		switch (evt.keyCode) {
@@ -293,21 +390,6 @@
 		default:
 		//Nothing happens
 		}
-	}
-	function getById(id) {
-		var numId = parseInt(id);
-		return function(item) { return item.id === numId;};
-	}
-	function updateFactory(id, extData) {
-		//Get the value with the id
-		var factory = fakelist.find(getById(id));
-		var data = extData || {};
-		for( var prop in data){
-			if ( data.hasOwnProperty(prop) && factory.hasOwnProperty(prop)) {
-				factory[prop] = data[prop];
-			}
-		}
-		loadFactory(factory);
 	}
 	//Keep it DRY creating DOM nodes
 	function newNode(tag, att, content) {
@@ -339,27 +421,47 @@
 		return node;
 	}
 	function loadFactory(factory) {
-		var cssId = cssIdPrefix+factory.id;
-		var branch = newNode("div", {"class":"branch",id: cssId, "data-id": factory.id });
+		var cssId = cssIdPrefix+factory.Id;
+		var branch = newNode("div", {"class":"branch",id: cssId, "data-id": factory.Id, "data-initial": JSON.stringify(factory) });
 		var oldNode = doc.getElementById(cssId);
+
+		//Delete
+		if ( factory.Delete ) {
+			if ( oldNode ) {
+				root.removeChild(oldNode)
+			}
+			setMargin();
+			return;
+		}
 		//Add name
-		branch.appendChild( newNode("div",{"class":"name", "data-id":factory.id}, factory.name) );
+		branch.appendChild( newNode("div",{"class":"name", "data-id":factory.Id}, factory.Name) );
 		//Add range
-		branch.appendChild( newNode("div", {"class":"range", "data-low":factory.low, "data-high": factory.high, "data-count": factory.members.length}, factory.low + ":" + factory.high))
+		branch.appendChild( newNode("div", {"class":"range", "data-low":factory.Low, "data-high": factory.High, "data-count": factory.Members.length}, factory.Low + ":" + factory.High))
 		//Add members
-		factory.members.forEach(function(item) {
+		factory.Members.forEach(function(item) {
 			branch.appendChild( newNode("div", {"class":"member"}, item) );
 		});
 
 		if ( oldNode ){
-			//Replace existing node
+			//Update
 			oldNode.removeAttribute("id");
 			root.insertBefore(branch, oldNode);
 			root.removeChild(oldNode);
 		} else {
+			//Create
 			root.appendChild(branch);
 		}
-
+		setMargin();
+	}
+	//Make the tree line look nice by setting the bottom margin
+	function setMargin() {
+		for (var i=0; i<root.children.length; i++) {
+			root.children[i].removeAttribute("style");
+		}
+		var last = doc.querySelector('#root > .branch:last-child');
+		if (last) {
+			last.style.marginBottom = (13 - last.clientHeight) + "px";
+		}
 	}
     function registerHandler (type ,selector, handler) {
     	if ( !eventHandlers[type] ){
