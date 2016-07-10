@@ -7,10 +7,10 @@ import (
 	"strconv"
 	"log"
 	"github.com/gorilla/websocket"
-	"fmt"
 	"time"
 	"encoding/json"
 	"math/rand"
+	"sync"
 )
 
 const (
@@ -27,8 +27,54 @@ const (
 	maxMessageSize = 512
 )
 
+// hub maintains the set of active connections and broadcasts messages to the
+// connections.
+type Hub struct {
+	// Registered connections.
+	connections map[*Conn]bool
+
+	// Inbound messages from the connections.
+	broadcast chan []byte
+
+	// Register requests from the connections.
+	register chan *Conn
+
+	// Unregister requests from connections.
+	unregister chan *Conn
+}
+
+var hub = Hub{
+	broadcast:   make(chan []byte),
+	register:    make(chan *Conn),
+	unregister:  make(chan *Conn),
+	connections: make(map[*Conn]bool),
+}
+
+func (h *Hub) run() {
+	for {
+		select {
+		case conn := <-h.register:
+			h.connections[conn] = true
+		case conn := <-h.unregister:
+			if _, ok := h.connections[conn]; ok {
+				delete(h.connections, conn)
+				close(conn.send)
+			}
+		case message := <-h.broadcast:
+			for conn := range h.connections {
+				select {
+				case conn.send <- message:
+				default:
+					close(conn.send)
+					delete(hub.connections, conn)
+				}
+			}
+		}
+	}
+}
+
 //Factories are defined here
-type factory struct {
+type Factory struct {
 	Id int
 	Name string
 	Low int
@@ -38,9 +84,9 @@ type factory struct {
 	Count int
 }
 
-func getAllFactories() []factory {
-	result := make([]factory, 2)
-	result[0] = factory {
+func getAllFactories() []Factory {
+	result := make([]Factory, 2)
+	result[0] = Factory {
 		Id: 69,
 		Name: "Jeremy",
 		Low: 70,
@@ -49,7 +95,7 @@ func getAllFactories() []factory {
 		Delete: false,
 		Count: 2,
 	}
-	result[1] = factory {
+	result[1] = Factory {
 		Id: 367,
 		Name: "djw",
 		Low: 42,
@@ -61,50 +107,7 @@ func getAllFactories() []factory {
 	return result
 }
 
-func writeLoop(c *websocket.Conn, send chan []byte) {
-	fmt.Println("Entering write loop")
-	//Setup ping -
-	ticker := time.NewTicker(pingPeriod)
-	defer func() {
-		ticker.Stop()
-		c.Close()
-	}()
-	for {
-		select {
-		case message, ok := <-send:
-			if !ok {
-				c.WriteMessage(websocket.CloseMessage, []byte{})
-				return
-			}
-
-			c.SetWriteDeadline(time.Now().Add(writeWait))
-			w, err := c.NextWriter(websocket.TextMessage)
-			if err != nil {
-				return
-			}
-			w.Write(message)
-
-			// Add queued chat messages to the current websocket message.
-			n := len(send)
-			for i := 0; i < n; i++ {
-				w.Write(<-send)
-			}
-
-			if err := w.Close(); err != nil {
-				return
-			}
-		case <-ticker.C:
-			fmt.Println("writing ping message")
-			if err := c.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
-				fmt.Println("Write pong fail")
-				return
-			}
-			c.SetWriteDeadline(time.Now().Add(writeWait))
-		}
-	}
-}
-
-func getIdx(f []factory, id int) int {
+func getIdx(f []Factory, id int) int {
 	//now locate the record
 	//Yes, I know this is inefficient
 	for idx, value := range f {
@@ -124,13 +127,188 @@ func randInts(low int, high int, count int) []int {
 	return result
 }
 
+var (
+	newline = []byte{'\n'}
+	space   = []byte{' '}
+)
+
+var upgrader = websocket.Upgrader{
+    ReadBufferSize:  1024,
+    WriteBufferSize: 1024,
+}
+
+// Conn is an middleman between the websocket connection and the hub.
+type Conn struct {
+	// The websocket connection.
+	ws *websocket.Conn
+
+	// Buffered channel of outbound messages.
+	send chan []byte
+}
+
+// readPump pumps messages from the websocket connection to the hub.
+func (c *Conn) readPump() {
+    //close connection upon exit
+	defer func() {
+		hub.unregister <- c
+		c.ws.Close()
+	}()
+	c.ws.SetReadLimit(maxMessageSize)
+	c.ws.SetReadDeadline(time.Now().Add(pongWait))
+	c.ws.SetPongHandler(func(string) error { c.ws.SetReadDeadline(time.Now().Add(pongWait)); return nil })
+	//Setup infinite loop to read messages
+    for {
+	    _, buffer, err := c.ws.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway) {
+				log.Printf("error: %v", err)
+			}
+			break
+		}
+
+	    //the incoming payload is a command
+	    //parse it and send the appropriate response
+	    command := string(buffer[:4])
+	    switch (command) {
+	    case "test":
+	    	//Only goes back to sender
+	    	c.send <- []byte("Hello World")
+	    case "list":
+	    	if data, err := json.Marshal(factories); err == nil {
+		    	c.send <- data	    		
+	    	}
+	    case "post":
+	    	//unmarsal json and upsert
+	    	newFactory := &Factory{}
+	    	id := 0
+	    	update := true
+	    	if err := json.Unmarshal(buffer[5:], newFactory); err == nil {
+	    		//if id is zero, add the factory to the array
+	    		if ( newFactory.Id == 0 ){
+	    			newFactory.Id = nextId.next()
+	    			factoryLock.Lock()
+	    			factories = append(factories, *newFactory)
+	    			factoryLock.Unlock()
+	    			update = false
+	    		}
+		    	id = newFactory.Id
+	    	}
+	    	//Yes, we are unmarshalling twice, once to get the id, again to update the record
+			factoryLock.Lock()
+    		if idx := getIdx(factories, id); idx >= 0 {
+    			if update {
+					json.Unmarshal(buffer[5:], &factories[idx])
+				}
+				//Generate members if necessary
+				if newFactory.Count > 0 {
+					factories[idx].Members = randInts(factories[idx].Low, factories[idx].High, factories[idx].Count)
+				}
+				if data, err := json.Marshal(factories[idx:idx+1]); err == nil {
+					//New update goes to everyone
+					hub.broadcast <- data
+    			}
+    		}
+			factoryLock.Unlock()
+	   	case "retr":
+	    	//parse id and return single
+	    	if id, err := strconv.ParseInt(string(buffer[5:]), 10, 64); err == nil {
+	    		//now locate the record
+	    		if idx := getIdx(factories, int(id)); idx >= 0 {
+    				if data, err := json.Marshal(factories[idx:idx+1]); err == nil {
+    					c.send <- data
+	    			}
+	    		}
+	    	}
+	    case "dele":
+	    	//parse id
+	    	if id, err := strconv.ParseInt(string(buffer[5:]), 10, 64); err == nil {
+    			factoryLock.Lock()
+	    		if idx := getIdx(factories, int(id)); idx >= 0 {
+    				factories = append(factories[:idx], factories[idx+1:]...)
+    				result := make([]Factory, 1)
+    				result[0] = Factory{Id: int(id), Delete: true}
+    				if data, err := json.Marshal(result); err == nil {
+    					hub.broadcast <- data
+    				}	    			
+	    		}
+    			factoryLock.Unlock()
+	    	}
+	    case "echo":
+	    	c.send <- buffer[5:]
+	    }
+	}
+}
+
+// write writes a message with the given message type and payload.
+func (c *Conn) write(mt int, payload []byte) error {
+	c.ws.SetWriteDeadline(time.Now().Add(writeWait))
+	return c.ws.WriteMessage(mt, payload)
+}
+
+// writePump pumps messages from the hub to the websocket connection.
+func (c *Conn) writePump() {
+	ticker := time.NewTicker(pingPeriod)
+	defer func() {
+		ticker.Stop()
+		c.ws.Close()
+	}()
+
+	for {
+		select {
+		case message, ok := <-c.send:
+			if !ok {
+				c.write(websocket.CloseMessage, []byte{})
+				return
+			}
+
+			c.ws.SetWriteDeadline(time.Now().Add(writeWait))
+			w, err := c.ws.NextWriter(websocket.TextMessage)
+			if err != nil {
+				return
+			}
+			w.Write(message)
+
+			// Add queued chat messages to the current websocket message.
+			n := len(c.send)
+			for i := 0; i < n; i++ {
+				w.Write(newline)
+				w.Write(<-c.send)
+			}
+
+			if err := w.Close(); err != nil {
+				return
+			}
+		case <-ticker.C:
+			if err := c.write(websocket.PingMessage, []byte{}); err != nil {
+				return
+			}
+		}
+	}
+}
+
+var factories = getAllFactories()
+var factoryLock sync.Mutex
+
+type IdCounter struct {
+	id int
+	mux sync.Mutex
+}
+
+func (idc *IdCounter) next() int {
+	idc.mux.Lock()
+	defer idc.mux.Unlock()
+	val := idc.id
+	idc.id++
+	return val
+}
+
+var nextId = IdCounter { id: 401 }
+
+
 func main() {
 	var listenAddr = flag.String("http", ":8080", "address to listen on for HTTP")
 	flag.Parse()
-
-	factories := getAllFactories()
-	nextId := 444
-
+	go hub.run()
 	//Serve index file
 	http.Handle("/test", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		file, _ := os.Open("index.html")
@@ -143,104 +321,18 @@ func main() {
 		w.Write(buffer[:contentLength])
 	}))
 
-var upgrader = websocket.Upgrader{
-    ReadBufferSize:  1024,
-    WriteBufferSize: 1024,
-}
+
 
 http.Handle("/ws", http.HandlerFunc(func (w http.ResponseWriter, r *http.Request) {
-    conn, err := upgrader.Upgrade(w, r, nil)
+    ws, err := upgrader.Upgrade(w, r, nil)
     if err != nil {
         log.Println(err)
         return
     }
-    send := make(chan []byte, 256)
-    //new thread to write response
-    go writeLoop(conn, send)
-    //close connection upon exit
-	defer conn.Close()
-	//setup pong handlers
-	conn.SetReadLimit(maxMessageSize)
-	conn.SetReadDeadline(time.Now().Add(pongWait))
-	conn.SetPongHandler(func(string) error { conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
-	//Setup infinite loop to read messages
-    for {
-	    _, buffer, err := conn.ReadMessage()
-
-	    if ( err != nil ){
-	    	fmt.Println(err)
-	    	break
-	    }
-	    //the incoming payload is a command
-	    //parse it and send the appropriate response
-	    command := string(buffer[:4])
-	    switch (command) {
-	    case "test":
-	    	send <- []byte("Hello World")
-	    case "list":
-	    	if data, err := json.Marshal(factories); err == nil {
-		    	send <- data	    		
-	    	}
-	    case "post":
-	    	//unmarsal json and upsert
-	    	newFactory := &factory{}
-	    	id := 0
-	    	update := true
-	    	if err := json.Unmarshal(buffer[5:], newFactory); err == nil {
-	    		//if id is zero, add the factory to the array
-	    		if ( newFactory.Id == 0 ){
-	    			fmt.Println("New id issued", nextId)
-	    			newFactory.Id = nextId
-	    			nextId++
-	    			factories = append(factories, *newFactory)
-	    			update = false
-	    		}
-		    	id = newFactory.Id
-	    	} else {
-	    		fmt.Println("error on unmarshal", err)
-	    	}
-	    	fmt.Println("id",id)
-	    	//Yes, we are unmarshalling twice, once to get the id, again to update the record
-    		if idx := getIdx(factories, id); idx >= 0 {
-    			if update {
-					json.Unmarshal(buffer[5:], &factories[idx])
-					fmt.Println("update", string(buffer[5:]))
-				}
-				//Generate members if necessary
-				if newFactory.Count > 0 {
-					factories[idx].Members = randInts(factories[idx].Low, factories[idx].High, factories[idx].Count)
-				}
-				if data, err := json.Marshal(factories[idx:idx+1]); err == nil {
-					send <- data
-    			}
-    		}
-	   	case "retr":
-	    	//parse id and return single
-	    	if id, err := strconv.ParseInt(string(buffer[5:]), 10, 64); err == nil {
-	    		//now locate the record
-	    		if idx := getIdx(factories, int(id)); idx >= 0 {
-    				if data, err := json.Marshal(factories[idx:idx+1]); err == nil {
-    					send <- data
-	    			}
-	    		}
-	    	}
-	    case "dele":
-	    	//parse id
-	    	if id, err := strconv.ParseInt(string(buffer[5:]), 10, 64); err == nil {
-	    		//now locate the record
-	    		if idx := getIdx(factories, int(id)); idx >= 0 {
-    				factories = append(factories[:idx], factories[idx+1:]...)
-    				result := make([]factory, 1)
-    				result[0] = factory{Id: int(id), Delete: true}
-    				if data, err := json.Marshal(result); err == nil {
-    					send <- data
-    				}	    			
-	    		}
-	    	}
-	    case "echo":
-	    	send <- buffer[5:]
-	    }
-	}
+	conn := &Conn{send: make(chan []byte, 256), ws: ws}
+	hub.register <- conn
+	go conn.writePump()
+	conn.readPump()
 }));
 
 

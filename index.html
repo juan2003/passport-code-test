@@ -3,7 +3,7 @@
 <head>
 <title>Passport Code Test</title>
 <style type="text/css">
-	html {
+	html, body {
 		box-sizing: border-box;
 		font-size: 12pt;
 		font-family: sans-serif;
@@ -11,11 +11,42 @@
 	*, *:before, *:after {
 		box-sizing: inherit;
 	}
+	#disconnected::before {
+		content: 'Disconnected - click to reconnect';
+		z-index: 3;
+		position: absolute;
+		top: 50%;
+		left: 50%;
+		width: 20em;
+		line-height: 2em;
+		font-size: 2em;
+		margin: -1em 0 0 -10em;
+		border: 2pt solid black;
+		background-color: white;
+		color: black;
+		text-align: center;
+	}
+	#disconnected {
+		position: fixed;
+		top: 0;
+		left: 0;
+		width: 100%;
+		height: 100%;
+		background-color: rgba(0,0,0,0.7);
+		z-index: 2;
+	}
 	#root {
 		border-left: 2pt solid black;
 		position: relative;
-		margin: 1em;
+		margin: 1em auto;
 		padding-bottom: 1px;
+		max-width: 40em;
+	}
+	#root.loading {
+		opacity: 0.3;
+	}
+	#root.loading::before {
+		content: 'Loading...';
 	}
 	#root .create-new {
 		position: absolute;
@@ -29,7 +60,7 @@
 		left: -1em;
 		right: -1em;
 		height: 1.5em;
-		background-color: rgb(86, 250, 192);
+		background-color: #0bd;
 		color: white;
 		padding: 0.25em 0.6em;
 	}
@@ -115,17 +146,19 @@
 <h1>Passport Code Test</h1>
 <div id="root">
 </div>
+<div id="disconnected">Test</div>
 <script>
 "use strict";
 (function(doc){
 	//V2 uses websockets for a single connection
 	var cssIdPrefix = "factory-";
 	var branchSelector = ".branch";
+	var loadingClass = "loading";
 	var eventHandlers = {};
 	var root = doc.getElementById("root");
 	var contextMenu = buildContextMenu();
 	var ctxActive = false;
-	var connection = initWebsocket();
+	var connection = null;
 	function init() {
 		registerHandler("click", ".create-new", addNewFactory);
 		registerHandler("click", ".name", renameFactory);
@@ -138,22 +171,30 @@
 		registerHandler("click", "nav.context-menu a.generate", generateContext);
 		registerHandler("click", "nav.context-menu a.change", rangeContext);
 		registerHandler("click", "*", hideContextMenu);
+		registerHandler("click", "#disconnected", initWebsocket);
 		root.appendChild( newNode("button", {"class": "create-new"}, "Create New"));
+		initWebsocket();
 	}
 	function initWebsocket() {
-		var connection = new WebSocket("ws://"+location.host+"/ws");
+		connection = new WebSocket("ws://"+location.host+"/ws");
+		var dc = doc.getElementById("disconnected");
+		if ( dc ){
+			dc.parentElement.removeChild(dc);
+		}
+		root.classList.add(loadingClass);
 		connection.onmessage = function(evt) {
 			var data = JSON.parse(evt.data);
 			data.forEach(loadFactory);
 		};
 		connection.onopen = function() {
+			root.classList.remove(loadingClass);
 			wsList();
-			setInterval(wsPing, 11000);
+			//setInterval(wsPing, 11000);
 		};
 		connection.onclose = function() {
-			console.log("The store is closed");
+			//Notify user that UI is dead; allow reconnection
+			root.parentElement.appendChild(newNode("div",{id:"disconnected"}));
 		}
-		return connection; 
 	}
 	function wsPing() {
 		connection.send("echo []");
