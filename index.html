@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Passport Code Test</title>
+<style type="text/css">
+	html {
+		box-sizing: border-box;
+		font-size: 12pt;
+		font-family: sans-serif;
+	}
+	*, *:before, *:after {
+		box-sizing: inherit;
+	}
+	#root {
+		border-left: 2pt solid black;
+		position: relative;
+		margin: 1em;
+	}
+	#root .create-new {
+		position: absolute;
+		top: -1.9em;
+		right: -1em;
+	}
+	#root::before {
+		content: 'Root';
+		position: absolute;
+		top: -1.5em;
+		left: -1em;
+		right: -1em;
+		height: 1.5em;
+		background-color: #0bd;
+		color: white;
+		padding: 0.25em 0.6em;
+	}
+	#root .branch {
+		position: relative;
+		margin: 2em 1em;
+		border-left: 2pt solid black;
+		top: 1.4em;
+		padding: 0 0.5em;
+	}
+	#root .branch::before {
+		content: '';
+		position: absolute;
+		top: -0.7em;
+		left: -1.1em;
+		width: 0.5em;
+		border-top: 2pt solid black;
+	}
+	#root .branch .name {
+		font-weight: bold;
+		position: absolute;
+		top: -1.2em;
+		left: -0.5em;
+	}
+	#root .branch .range {
+		position: absolute;
+		top: -1.3em;
+		right: 1em;
+		background-color: gray;
+		color: white;
+		border-radius: 1em;
+		font-size: 0.7em;
+		padding: 0.1em 0.5em;
+	}
+	#root .branch .range input {
+		width: 3em;
+	}
+	#root .branch .member {
+		position: relative;
+		top: 0.5em;
+		display: block;
+	}
+	#root .branch .member input {
+		width: 5em;
+	}
+	#root .branch .member::before {
+		content: '';
+		border-top: 2pt solid black;
+		width: 0.5em;
+		top: 0.5em;
+		left: -0.5em;
+		position: absolute;
+	}
+	nav.context-menu {
+		position: absolute;
+		border: 1px solid red;
+		display: none;
+	}
+</style>
+</head>
+<body>
+<h1>Passport Code Test</h1>
+<div id="root">
+</div>
+<script>
+"use strict";
+(function(doc){
+	//V1 is front-end only
+	var cssIdPrefix = "factory-";
+	var fakelist = [
+		{name: "Jeremy", id:1, low: 70, high: 420, members: [286, 154]},
+		{name:"djw", id:2, low:42, high: 256, members: [86,250,192]}
+	];
+	var eventHandlers = {};
+	var root = doc.getElementById("root");
+	var contextMenu = buildContextMenu();
+	var ctxActive = false;
+	function init() {
+		registerHandler("click", ".create-new", addNewFactory);
+		registerHandler("click", ".name", renameFactory);
+		registerHandler("contextmenu", ".branch *", showContextMenu);
+		registerHandler("click", ".range", updateRange);
+		registerHandler("click", ".branch .go", generateMembers);
+		registerHandler("click", ".branch .cancel", revertChanges);
+		registerHandler("click", "nav.context-menu a.delete", deleteFactory);
+		registerHandler("click", "*", hideContextMenu);
+		root.appendChild( newNode("button", {"class": "create-new"}, "Create New"));
+		fakelist.forEach(loadFactory);
+	}
+	function getId (node) {
+		var el = node;
+		while ( !el.dataset.id ){
+			el = el.parentElement;
+		}
+		return el.dataset.id;
+	}
+	function buildContextMenu () {
+		var ul = newNode("ul");
+		var nav = newNode("nav", {"class":"context-menu"}, ul);
+		ul.appendChild( newNode("li", {}, newNode("a", {href:"#", "class": "delete"}, "Delete")) );
+		root.parentElement.appendChild(nav);
+		return nav;
+	}
+	function hideContextMenu(evt) {
+		if ( ctxActive ){
+			contextMenu.style.display = "";
+			ctxActive = false;
+		}
+	}
+	function showContextMenu (evt) {
+		evt.preventDefault();
+		contextMenu.dataset.id = getId(evt.target);
+		contextMenu.style.top = evt.clientY+"px";
+		contextMenu.style.left = evt.clientX+"px";
+		contextMenu.style.display = "block";
+		ctxActive = true;
+	}
+	function deleteFactory (evt) {
+		evt.preventDefault();
+		var id = getId(this);
+		var idx = fakelist.findIndex(getById(id));
+		fakelist.splice(idx);
+		root.removeChild(root.querySelector("#"+cssIdPrefix+id) );
+	}
+	function addNewFactory (evt) {
+		evt.preventDefault();
+		var form = newNode("form", {"class":"branch"});
+		var name = newNode("label", {"class":"name"}, "Name");
+		name.appendChild(newNode("input", {name:"name", type:"text"}));
+
+		var low = newNode("label", {"class":"member"}, "Low");
+		low.appendChild(newNode("input", {name:"low", type: "number"}));
+		var high = newNode("label", {"class":"member"}, "High");
+		high.appendChild(newNode("input", {name:"high", type: "number"}));
+		var count = newNode("label", {"class":"member"}, "Count");
+		count.appendChild(newNode("input", {name:"count", type: "number", min: 1, max: 15}));
+		var actions = newNode("div", {"class":"member"});
+		actions.appendChild(newNode("button", {"class":"go"}, "Create"));
+		actions.appendChild(newNode("button", {"class":"cancel"}, "Cancel"));
+
+		form.appendChild( name );
+		form.appendChild( low );
+		form.appendChild( high );
+		form.appendChild( count );
+		form.appendChild( actions );
+
+		root.appendChild(form);
+		form[0].select();
+	}
+	function updateRange (evt) {
+		evt.preventDefault();
+		if (this.children.length > 0){
+			return;
+		}
+		//Create the update range UI
+		var branch = this.parentElement;
+		var rangeNode = newNode("form");
+		var low = newNode("input", {name:"low",type:"number", value:this.dataset.low, "data-oldvalue": this.dataset.low});
+		var high = newNode("input", {name:"high",type:"number", value:this.dataset.high, "data-oldvalue": this.dataset.high});
+		var count = newNode("input", {name:"count",type:"number", value:this.dataset.count, "data-oldvalue": this.dataset.count, min: 1, max: 15});
+		var button = newNode("button", {"class":"go","data-id": branch.dataset.id}, "Go");
+		var cancel = newNode("a", {href:"#","class":"cancel","data-id": branch.dataset.id}, "Cancel");
+		this.textContent = "";
+
+		rangeNode.appendChild( low );
+		rangeNode.appendChild( high );
+		rangeNode.appendChild( count );
+		rangeNode.appendChild( button );
+		rangeNode.appendChild( cancel );
+		this.appendChild(rangeNode);
+	}
+	function revertChanges (evt) {
+		evt.preventDefault();
+		var id = getId(this);
+		if (id ){
+			updateFactory(id);
+		} else {
+			root.removeChild(el);
+		}
+	}
+	function newFactory () {
+		var id = fakelist.length
+		fakelist.push( {
+			id: id+1,
+			name: "New Factory",
+			low: 0,
+			high: 100,
+			count: 5,
+			members: []
+		});
+		return fakelist[id];
+	}
+	function generateMembers (evt) {
+		evt.preventDefault();
+		var factory= fakelist.find(getById(this.dataset.id)) || newFactory();
+		var i, prop;
+		//Copy form values onto factory object
+		var form = this.form;
+		for(i=0; i< form.length; i++){
+			prop = form[i].name;
+			switch (prop) {
+			case "low":
+			case "high":
+			case "count":
+				factory[prop] = parseInt(form[i].value);
+				break;
+			case "name":
+				factory[prop] = form[i].value;
+				break;
+			default:
+				//Unknown field
+			}
+		}
+		//Create members
+		factory.members.splice(0);
+		var range = factory.high - factory.low;
+		for(i=0; i<factory.count; i++){
+			factory.members.push( factory.low + Math.floor(Math.random() * range) );
+		}
+		//Add the id to the form
+		var el = this;
+		while( !el.matches(".branch") ){
+			el=el.parentElement;
+		}
+		if ( !el.id ){
+			el.id = cssIdPrefix+factory.id;
+		}
+		updateFactory(factory.id);
+	}
+	function renameFactory(evt) {
+		evt.preventDefault();
+		if ( this.children.length > 0 ){
+			return;
+		}
+		var nameNode = this;
+		var oldName = this.textContent;
+		var newTextInput = newNode("input", {value: oldName, type: "text", "data-id": nameNode.dataset.id, "data-oldvalue":oldName});
+		newTextInput.addEventListener("blur", setNewName, true);
+		newTextInput.addEventListener("keydown", enterBlur, true);
+		nameNode.textContent = "";
+		nameNode.appendChild( newTextInput );
+		newTextInput.select();
+	}
+	function setNewName(evt) {
+		var data = {};
+		if ( this.value != this.dataset.oldvalue) {
+			data.name = this.value;
+		}
+		updateFactory(this.dataset.id, data);	
+	}
+	function enterBlur (evt) {
+		switch (evt.keyCode) {
+		//Update on Enter
+		case 13:
+			this.blur();
+			break;
+		//Cancel on Esc
+		case 27:
+			this.value = this.dataset.oldvalue;
+			this.blur();
+			break;
+		default:
+		//Nothing happens
+		}
+	}
+	function getById(id) {
+		var numId = parseInt(id);
+		return function(item) { return item.id === numId;};
+	}
+	function updateFactory(id, extData) {
+		//Get the value with the id
+		var factory = fakelist.find(getById(id));
+		var data = extData || {};
+		for( var prop in data){
+			if ( data.hasOwnProperty(prop) && factory.hasOwnProperty(prop)) {
+				factory[prop] = data[prop];
+			}
+		}
+		loadFactory(factory);
+	}
+	//Keep it DRY creating DOM nodes
+	function newNode(tag, att, content) {
+		var node = doc.createElement(tag);
+		var attributes = att || {};
+		for( var prop in attributes){
+			if ( attributes.hasOwnProperty(prop) ){
+				node.setAttribute(prop, attributes[prop]);
+			}
+		}
+		switch (typeof content) {
+			case "number":
+			case "string":
+			node.appendChild( document.createTextNode(content) );
+			break;
+			case "object":
+			//Test for null
+			if (content) {
+				node.appendChild(content);
+			}
+			break;
+			case "undefined":
+			//Do nothing if undefined
+			break;
+			default:
+			//Unknown or unhandled type - boolean?
+			console.log("Unhandled type", content);
+		}
+		return node;
+	}
+	function loadFactory(factory) {
+		var cssId = cssIdPrefix+factory.id;
+		var branch = newNode("div", {"class":"branch",id: cssId, "data-id": factory.id });
+		var oldNode = doc.getElementById(cssId);
+		//Add name
+		branch.appendChild( newNode("div",{"class":"name", "data-id":factory.id}, factory.name) );
+		//Add range
+		branch.appendChild( newNode("div", {"class":"range", "data-low":factory.low, "data-high": factory.high, "data-count": factory.members.length}, factory.low + ":" + factory.high))
+		//Add members
+		factory.members.forEach(function(item) {
+			branch.appendChild( newNode("div", {"class":"member"}, item) );
+		});
+
+		if ( oldNode ){
+			//Replace existing node
+			oldNode.removeAttribute("id");
+			root.insertBefore(branch, oldNode);
+			root.removeChild(oldNode);
+		} else {
+			root.appendChild(branch);
+		}
+
+	}
+    function registerHandler (type ,selector, handler) {
+    	if ( !eventHandlers[type] ){
+    		//This is the first event of its type
+    		//register the universal handler on the document
+    		doc.addEventListener(type, universalEventHandler, true);
+    		eventHandlers[type] = [];
+    	}
+        handler.selector = selector;
+        eventHandlers[type].push(handler);
+    }
+    function universalEventHandler(evt){
+        // evt.target is the element clicked
+        var target = evt.target;
+        var handlers = eventHandlers[evt.type] || [];
+        // filter the handlers by selector, then call with the target
+        handlers
+            .filter (function(h){ return target.matches(h.selector); })
+            .forEach(function(h) { h.call(target, evt) });
+    }
+    init();
+})(document);
+</script>
+</body>
+</html>
